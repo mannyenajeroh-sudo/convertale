@@ -13,11 +13,15 @@ from showrunner_api.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-settings = get_settings()
+# Get settings with cache cleared to ensure fresh load on module reload
+settings = get_settings(clear_cache=True)
 
 # Initialize dashscope SDK (if API key is present)
 if settings.effective_dashscope_key:
     dashscope.api_key = settings.effective_dashscope_key
+    logger.info(f"Dashscope initialized with key prefix: {settings.effective_dashscope_key[:8]}...")
+else:
+    logger.warning("No QWEN_API_KEY or DASHSCOPE_API_KEY configured - API calls will return stub responses")
 
 _TRANSIENT_EXCEPTIONS = (
     httpx.ConnectError,
@@ -34,7 +38,7 @@ async def call_qwen(
     json_mode: bool = False,
 ) -> str:
     """
-    Call Qwen text API using httpx.
+    Call Qwen text API using httpx with OpenAI-compatible endpoint.
     """
     api_key = settings.effective_dashscope_key
     if not api_key:
@@ -43,7 +47,10 @@ async def call_qwen(
             return "{}"
         return "Stub response since no Qwen API key is configured."
 
-    url = f"{settings.qwen_base_url.rstrip('/')}/chat/completions"
+    # Ensure base URL doesn't have trailing slash before appending path
+    base_url = settings.qwen_base_url.rstrip("/")
+    url = f"{base_url}/chat/completions"
+    
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -63,12 +70,26 @@ async def call_qwen(
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
         
+    # Log request details (without exposing full key)
+    key_preview = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) >= 12 else api_key[:8]
+    logger.debug(f"Calling Qwen API: POST {url} with key {key_preview}, model={model}")
+    
     async with httpx.AsyncClient(timeout=120.0) as client:
         try:
             response = await client.post(url, headers=headers, json=payload)
+            
+            # Log response status for debugging
+            if response.status_code != 200:
+                logger.error(
+                    f"Qwen API returned {response.status_code}: {response.text[:200]}"
+                )
+                
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            logger.debug(f"Qwen API response received ({len(content)} chars)")
+            return content
+            
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP error calling Qwen API: {e.response.text}")
             raise
