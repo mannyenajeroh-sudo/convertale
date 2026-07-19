@@ -1,18 +1,8 @@
 // ════════════════════════════════════════════════════════════════
 //  CONFIG
 // ════════════════════════════════════════════════════════════════
-// FIXED: default port was 8080 — the backend actually runs on 8000
-// (per every terminal log in this debugging session: "Uvicorn running on
-// http://127.0.0.1:8000"). Harmless if window.__CONVERTALE_API_URL__ is
-// always set correctly by app/dashboard/page.tsx, but a silent trap if it
-// isn't — every fetch would fail with a connection error against a port
-// nothing is listening on.
 const API = window.__CONVERTALE_API_URL__ || 'http://127.0.0.1:8000';
-// getAuthToken() is injected by app/dashboard/page.tsx (backed by Clerk's
-// useAuth().getToken()). The dashboard previously called the API with no
-// Authorization header at all, so every authenticated call (e.g.
-// POST /api/campaigns, which requires a Clerk bearer token) would have
-// always failed with 401 against the real backend.
+
 async function authHeaders(extra) {
   const token = window.__CONVERTALE_GET_TOKEN__ ? await window.__CONVERTALE_GET_TOKEN__() : null;
   return { ...(extra || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) };
@@ -31,34 +21,14 @@ const AGENTS = [
   { key: 'assembly',    name: 'Editor',           role: 'ffmpeg concat + SRT subtitle burn-in',           icon: 'M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8.5 7.5L20 18M8.5 16.5L20 6' },
 ];
 
-const railEl = document.getElementById('agentRail');
+// DOM refs — assigned once the DOM is ready
+let railEl, streamEl, dot, statusText;
 const agentNodes = {};
 
-for (const a of AGENTS) {
-  const el = document.createElement('div');
-  el.className = 'agent-node';
-  el.id = 'node-' + a.key;
-  el.innerHTML = `
-    <div class="agent-icon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-        <path d="${a.icon}"/>
-      </svg>
-    </div>
-    <div class="agent-info">
-      <div class="agent-name">${a.name}</div>
-      <div class="agent-role">${a.role}</div>
-    </div>`;
-  railEl.appendChild(el);
-  agentNodes[a.key] = el;
-}
-
-// FIXED: nothing previously tracked which project is currently active, so
-// the episode gallery had no way to know what to fetch — it just always
-// rendered the same hardcoded placeholder card instead.
 let currentProjectId = null;
 let episodePollTimer = null;
-
 let activeAgent = null;
+
 function setAgent(key) {
   if (activeAgent && key !== activeAgent) {
     agentNodes[activeAgent].classList.remove('active');
@@ -82,8 +52,8 @@ function completeRail() {
 // ════════════════════════════════════════════════════════════════
 //  ACTIVITY LOG
 // ════════════════════════════════════════════════════════════════
-const streamEl = document.getElementById('activityStream');
 function log(msg, cls='') {
+  if (!streamEl) return;
   const empties = streamEl.querySelectorAll('.stream-empty');
   empties.forEach(e => e.remove());
   const div = document.createElement('div');
@@ -95,16 +65,15 @@ function log(msg, cls='') {
   streamEl.scrollTop = streamEl.scrollHeight;
 }
 function clearStream() {
+  if (!streamEl) return;
   streamEl.innerHTML = '<div class="stream-empty">Stream cleared.</div>';
 }
 
 // ════════════════════════════════════════════════════════════════
 //  API STATUS CHECK
 // ════════════════════════════════════════════════════════════════
-const dot = document.getElementById('statusDot');
-const statusText = document.getElementById('statusText');
-
 async function checkApiStatus() {
+  if (!dot || !statusText) return false;
   try {
     const res = await fetch(`${API}/health`, { signal: AbortSignal.timeout(3000) });
     if (res.ok) {
@@ -125,10 +94,11 @@ const leads = JSON.parse(localStorage.getItem('cv_leads') || '[]');
 const campaigns = JSON.parse(localStorage.getItem('cv_campaigns') || '[]');
 
 function updateStats() {
-  document.getElementById('statCampaigns').textContent = campaigns.length;
-  document.getElementById('statLeads').textContent = leads.length;
+  const statCampaigns = document.getElementById('statCampaigns');
+  const statLeads = document.getElementById('statLeads');
+  if (statCampaigns) statCampaigns.textContent = campaigns.length;
+  if (statLeads) statLeads.textContent = leads.length;
 }
-updateStats();
 
 // ════════════════════════════════════════════════════════════════
 //  GENERATE CAMPAIGN
@@ -149,10 +119,9 @@ async function generateCampaign() {
   btn.innerHTML = '<div class="spinner"></div> Commissioning…';
   resultEl.style.display = 'none';
   resetRail();
-  dot.className = 'status-dot running';
-  statusText.textContent = 'Pipeline running…';
+  if (dot) dot.className = 'status-dot running';
+  if (statusText) statusText.textContent = 'Pipeline running…';
 
-  // Simulate agent steps while calling real API
   const steps = [
     { key: 'intake',     msg: 'Parsing brand brief…', delay: 600 },
     { key: 'writers',    msg: 'Writers Room crafting story arc…', delay: 1200 },
@@ -204,29 +173,19 @@ async function generateCampaign() {
       localStorage.setItem('cv_campaigns', JSON.stringify(campaigns));
       updateStats();
 
-      // FIXED: previously wrote `numEp` (whatever the user typed into the
-      // form) straight into the episode-count stat and left it there
-      // forever. Writers Room actually decides 3-5 episodes on its own —
-      // it doesn't even receive numEp as a parameter — so this number was
-      // frequently wrong and never corrected itself. Show the requested
-      // count as a provisional placeholder, then let startEpisodePolling /
-      // refreshEpisodes overwrite it with the real count once the backend
-      // reports one.
-      document.getElementById('statEpisodes').textContent = numEp;
-      document.getElementById('bibleSeriesId').textContent = projectId?.slice(0,8) || '';
+      const statEpisodes = document.getElementById('statEpisodes');
+      if (statEpisodes) statEpisodes.textContent = numEp;
+      const bibleSeriesId = document.getElementById('bibleSeriesId');
+      if (bibleSeriesId) bibleSeriesId.textContent = projectId?.slice(0,8) || '';
       renderBible(protName, protLook, numEp);
 
       resultEl.style.display = 'block';
       resultEl.style.color = 'var(--green)';
       resultEl.textContent = `✓ Project ${projectId} queued. Background pipeline started.`;
       log(`Campaign created: ${projectId}`, 'ok');
-      dot.className = 'status-dot online';
-      statusText.textContent = 'Pipeline queued';
+      if (dot) dot.className = 'status-dot online';
+      if (statusText) statusText.textContent = 'Pipeline queued';
 
-      // FIXED: this is the piece that was missing entirely — nothing ever
-      // polled the backend for real progress after submission, so the
-      // episode gallery just sat on its one hardcoded placeholder card
-      // forever, and "Refresh" had nothing real to refresh.
       startEpisodePolling(projectId);
     } else {
       const err = await res.json().catch(() => ({}));
@@ -235,8 +194,8 @@ async function generateCampaign() {
   } catch(e) {
     clearInterval(stepInterval);
     log(`Error: ${e.message}`, 'err');
-    dot.className = 'status-dot error';
-    statusText.textContent = 'Error';
+    if (dot) dot.className = 'status-dot error';
+    if (statusText) statusText.textContent = 'Error';
     resultEl.style.display = 'block';
     resultEl.style.color = 'var(--red)';
     resultEl.textContent = `✗ ${e.message}`;
@@ -251,6 +210,7 @@ async function generateCampaign() {
 // ════════════════════════════════════════════════════════════════
 function renderBible(name, look, epCount, identityScore) {
   const el = document.getElementById('bibleContent');
+  if (!el) return;
   if (!name) { el.innerHTML = '<div class="bible-empty">No series commissioned yet.</div>'; return; }
   el.innerHTML = `
     <div class="bible-card">
@@ -278,14 +238,9 @@ function renderBible(name, look, epCount, identityScore) {
 // ════════════════════════════════════════════════════════════════
 //  EPISODE GALLERY
 // ════════════════════════════════════════════════════════════════
-// FIXED: this function used to unconditionally overwrite the gallery with
-// one hardcoded "Episode 01 / Processing… / rendering" card — it never
-// fetched anything, so clicking "Refresh" (which calls this function)
-// always produced identical fake markup no matter what actually happened
-// on the backend. It now fetches real episode status from the endpoint
-// added in showrunner_api/routers/projects.py and renders from that.
 async function refreshEpisodes() {
   const gallery = document.getElementById('episodeGallery');
+  if (!gallery) return;
 
   if (!currentProjectId) {
     gallery.innerHTML = `<div style="color:var(--text-faint);font-size:13px;padding:20px 0;text-align:center;">No campaign commissioned yet.</div>`;
@@ -304,10 +259,8 @@ async function refreshEpisodes() {
     return;
   }
 
-  // The real episode count is only known once Writers Room has actually
-  // run — update the stat card here instead of trusting the number typed
-  // into the form.
-  document.getElementById('statEpisodes').textContent = data.episode_count;
+  const statEpisodes = document.getElementById('statEpisodes');
+  if (statEpisodes) statEpisodes.textContent = data.episode_count;
 
   if (!data.episodes.length) {
     gallery.innerHTML = `<div style="color:var(--text-faint);font-size:13px;padding:20px 0;text-align:center;">Writers Room is still drafting the episode list…</div>`;
@@ -339,8 +292,6 @@ async function refreshEpisodes() {
       }).join('')}
     </div>`;
 
-  // Stop polling once every episode has finished — no point hammering the
-  // endpoint forever once there's nothing left to change.
   const allDone = data.episodes.length > 0 && data.episodes.every(ep => ep.status === 'completed');
   if (allDone && episodePollTimer) {
     clearInterval(episodePollTimer);
@@ -404,10 +355,9 @@ async function testGate() {
 function showView(name, evt) {
   ['studio','campaigns','leads'].forEach(v => {
     const el = document.getElementById(`view-${v}`);
-    el.style.display = v === name ? 'block' : 'none';
+    if (el) el.style.display = v === name ? 'block' : 'none';
   });
   document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
-  // Use the passed element if available, fall back to event target
   const trigger = (evt && evt.currentTarget) || (typeof event !== 'undefined' && event && event.target);
   if (trigger) trigger.classList.add('active');
   if (name === 'campaigns') loadCampaigns();
@@ -416,6 +366,7 @@ function showView(name, evt) {
 
 function loadCampaigns() {
   const el = document.getElementById('campaignsList');
+  if (!el) return;
   if (!campaigns.length) { el.innerHTML = '<div style="color:var(--text-faint);font-size:13px;padding:20px 0;text-align:center;">No campaigns yet. Commission one from the Studio.</div>'; return; }
   el.innerHTML = campaigns.map(c => `
     <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border);">
@@ -429,6 +380,7 @@ function loadCampaigns() {
 
 function loadLeads() {
   const el = document.getElementById('leadsList');
+  if (!el) return;
   if (!leads.length) { el.innerHTML = '<div style="color:var(--text-faint);font-size:13px;padding:20px 0;text-align:center;">No leads yet. Test the Cliffhanger Gate from the Studio.</div>'; return; }
   el.innerHTML = `
     <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
@@ -454,7 +406,7 @@ function escapeHtml(s) {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  FORM PERSISTENCE  (survive navigation away-and-back)
+//  FORM PERSISTENCE
 // ════════════════════════════════════════════════════════════════
 const FORM_FIELDS = [
   'rawBrief', 'campaignTitle', 'workspaceId',
@@ -480,29 +432,58 @@ function restoreFormFields() {
   } catch(_) {}
 }
 
-// Attach listeners to persist on every change
-FORM_FIELDS.forEach(id => {
-  const el = document.getElementById(id);
-  if (el) {
-    el.addEventListener('input', saveFormFields);
-    el.addEventListener('change', saveFormFields);
-  }
-});
-
-// Restore saved values immediately
-restoreFormFields();
-
-
 // ════════════════════════════════════════════════════════════════
-//  INIT
+//  INIT — DEFERRED UNTIL DOM IS READY
 // ════════════════════════════════════════════════════════════════
-checkApiStatus();
-setInterval(checkApiStatus, 15000);
+function initDashboard() {
+  railEl = document.getElementById('agentRail');
+  streamEl = document.getElementById('activityStream');
+  dot = document.getElementById('statusDot');
+  statusText = document.getElementById('statusText');
 
-// Keyboard shortcut
-document.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-    const btn = document.getElementById('generateBtn');
-    if (!btn.disabled) generateCampaign();
+  if (railEl) {
+    for (const a of AGENTS) {
+      const el = document.createElement('div');
+      el.className = 'agent-node';
+      el.id = 'node-' + a.key;
+      el.innerHTML = `
+        <div class="agent-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="${a.icon}"/>
+          </svg>
+        </div>
+        <div class="agent-info">
+          <div class="agent-name">${a.name}</div>
+          <div class="agent-role">${a.role}</div>
+        </div>`;
+      railEl.appendChild(el);
+      agentNodes[a.key] = el;
+    }
   }
-});
+
+  updateStats();
+  checkApiStatus();
+  setInterval(checkApiStatus, 15000);
+
+  FORM_FIELDS.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('input', saveFormFields);
+      el.addEventListener('change', saveFormFields);
+    }
+  });
+  restoreFormFields();
+
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      const btn = document.getElementById('generateBtn');
+      if (btn && !btn.disabled) generateCampaign();
+    }
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initDashboard);
+} else {
+  initDashboard();
+}

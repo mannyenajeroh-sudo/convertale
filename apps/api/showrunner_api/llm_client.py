@@ -13,14 +13,30 @@ from showrunner_api.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Clear cache to get fresh settings
-from showrunner_api.config import clear_settings_cache
-clear_settings_cache()
 settings = get_settings()
 
 # Initialize dashscope SDK (if API key is present)
 if settings.effective_dashscope_key:
     dashscope.api_key = settings.effective_dashscope_key
+
+    # FIXED: VideoSynthesis (and any other call that goes through the native
+    # DashScope SDK protocol, as opposed to the OpenAI-compatible httpx calls
+    # below) reads its endpoint from dashscope.base_http_api_url — a
+    # SEPARATE config value from settings.qwen_base_url. We were only ever
+    # setting dashscope.api_key, so the SDK fell back to its default
+    # endpoint, which does not recognize a workspace-scoped key (sk-ws-...)
+    # at all. This is documented behavior: Alibaba's own text-to-video API
+    # reference for wan2.6-t2v/ap-southeast-1 requires explicitly setting
+    # dashscope.base_http_api_url = 'https://{WorkspaceId}.ap-southeast-1
+    # .maas.aliyuncs.com/api/v1' for exactly this key type. Derive it from
+    # the same host already proven correct by the successful text/vision
+    # calls (settings.qwen_base_url), swapping the OpenAI-compatible path
+    # suffix for the SDK's native "/api/v1" path — rather than hardcoding a
+    # second, independent copy of the workspace host that could drift out
+    # of sync with qwen_base_url.
+    _workspace_host = settings.qwen_base_url.split("://", 1)[-1].split("/", 1)[0]
+    dashscope.base_http_api_url = f"https://{_workspace_host}/api/v1"
+    logger.info(f"✓ Dashscope SDK base_http_api_url set to {dashscope.base_http_api_url}")
 
 _TRANSIENT_EXCEPTIONS = (
     httpx.ConnectError,
@@ -51,52 +67,39 @@ async def call_qwen(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ]
-    
+
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
     }
-    
+
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    
+
     logger.info(f"🤖 Calling Qwen API: model={model}, json_mode={json_mode}")
-    logger.debug(f"   System prompt length: {len(system_prompt)} chars")
-    logger.debug(f"   User prompt length: {len(user_prompt)} chars")
-    
     async with httpx.AsyncClient(timeout=120.0) as client:
         try:
-            start_time = time.time()
+            start = time.monotonic()
             response = await client.post(url, headers=headers, json=payload)
-            elapsed = time.time() - start_time
-            
             response.raise_for_status()
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            
-            logger.info(f"✓ Qwen API response received in {elapsed:.2f}s")
-            logger.debug(f"   Response length: {len(content)} chars")
-            
-            return content
+            logger.info(f"✓ Qwen API response received in {time.monotonic() - start:.2f}s")
+            return data["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as e:
-            logger.error(f"❌ HTTP error calling Qwen API: {e.response.status_code} - {e.response.text}")
-            raise
-        except httpx.TimeoutException as e:
-            logger.error(f"⏱️ Timeout calling Qwen API after 120s: {e}")
+            logger.error(f"HTTP error calling Qwen API: {e.response.text}")
             raise
         except Exception as e:
-            logger.error(f"❌ Unexpected error calling Qwen API: {type(e).__name__}: {e}")
+            logger.error(f"Error calling Qwen API: {e}")
             raise
 
 
 def _image_uri(path: str | Path) -> str:
-    """Convert an image file to a base64 data URI."""
     data = Path(path).read_bytes()
     return "data:image/png;base64," + base64.b64encode(data).decode()
 
@@ -124,48 +127,30 @@ async def call_qwen_vision(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    
+
     content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
     for p in image_paths:
         content.append({"type": "image_url", "image_url": {"url": _image_uri(p)}})
-        
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": content}
     ]
-    
+
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
     }
-    
+
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    
-    logger.info(f"👁️ Calling Qwen-VL API: model={model}, images={len(image_paths)}")
-    
+
     async with httpx.AsyncClient(timeout=120.0) as client:
-        try:
-            start_time = time.time()
-            response = await client.post(url, headers=headers, json=payload)
-            elapsed = time.time() - start_time
-            
-            response.raise_for_status()
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            
-            logger.info(f"✓ Qwen-VL API response received in {elapsed:.2f}s")
-            return content
-        except httpx.HTTPStatusError as e:
-            logger.error(f"❌ HTTP error calling Qwen-VL API: {e.response.status_code} - {e.response.text}")
-            raise
-        except httpx.TimeoutException as e:
-            logger.error(f"⏱️ Timeout calling Qwen-VL API after 120s: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"❌ Unexpected error calling Qwen-VL API: {type(e).__name__}: {e}")
-            raise
+        response = await client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
 
 
 async def generate_video_t2v(
@@ -183,10 +168,11 @@ async def generate_video_t2v(
     if not settings.effective_dashscope_key:
         logger.warning("No QWEN_API_KEY, returning stub video URL.")
         return f"https://example.com/stub_{uuid.uuid4().hex[:8]}.mp4"
-    
+
     logger.info(f"🎬 Submitting video generation task: model={model}, duration={duration}s")
-        
-    # We use synchronous Dashscope SDK for submission
+
+    # We use synchronous Dashscope SDK for submission, wrapped or just directly if it's quick
+    # (Dashscope SDK does network request so it blocks, but we can live with it for this submission step)
     task = VideoSynthesis.call(
         model=model,
         prompt=prompt,
@@ -194,23 +180,35 @@ async def generate_video_t2v(
         duration=duration,
     )
     if task.status_code != 200:
-        logger.error(f"❌ Video submission failed: {task.status_code} {task.code} {task.message}")
         raise RuntimeError(f"Wan submit failed: {task.status_code} {task.code} {task.message}")
-    
-    logger.info(f"✓ Video task submitted successfully, polling for completion...")
-        
+
+    # VideoSynthesis.call() already blocks internally until the task reaches
+    # a terminal state (see dashscope's base_api.py: .call() invokes .wait()
+    # for you), so task.output should already carry the finished video_url
+    # here rather than needing a fresh round of polling from scratch.
+    video_url = getattr(task.output, "video_url", None)
+    if video_url:
+        return video_url
+
+    # Fallback: if the SDK ever returns before the task is actually terminal
+    # (e.g. a future SDK version splitting submit/wait behavior), poll it
+    # ourselves via raw HTTP.
     return await _poll_task(task.output.task_id, poll_interval=poll_interval, timeout=timeout)
 
 
 async def _poll_task(task_id: str, poll_interval: int = 8, timeout: int = 600) -> str:
     """Poll /tasks/{id} tolerating transient network errors."""
-    url = f"https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+    # FIXED: was hardcoded to the generic https://dashscope.aliyuncs.com
+    # host. A workspace-scoped key (sk-ws-...) is only valid against its own
+    # workspace endpoint — same root cause as the base_http_api_url fix
+    # above. Reuse the same derived workspace host so task-status polling
+    # doesn't 401 the same way task submission did.
+    workspace_host = settings.qwen_base_url.split("://", 1)[-1].split("/", 1)[0]
+    url = f"https://{workspace_host}/api/v1/tasks/{task_id}"
     headers = {"Authorization": f"Bearer {settings.effective_dashscope_key}"}
     deadline = time.time() + timeout
     transient = 0
-    
-    logger.debug(f"Starting poll for task {task_id}, timeout={timeout}s")
-    
+
     async with httpx.AsyncClient() as client:
         while time.time() < deadline:
             try:
@@ -218,28 +216,22 @@ async def _poll_task(task_id: str, poll_interval: int = 8, timeout: int = 600) -
                 resp.raise_for_status()
                 out = resp.json().get("output", {})
                 status = out.get("task_status")
-                
+
                 if status == "SUCCEEDED":
-                    logger.info(f"✓ Video task {task_id} completed successfully")
                     return out["video_url"]
                 if status == "FAILED":
-                    logger.error(f"❌ Video task {task_id} failed: {out}")
                     raise RuntimeError(f"Wan task {task_id} FAILED: {out}")
-                    
+
                 transient = 0
-                logger.debug(f"Task {task_id} status: {status}, continuing to poll...")
             except _TRANSIENT_EXCEPTIONS as exc:
                 transient += 1
                 if transient > 8:
-                    logger.error(f"❌ Too many transient errors polling task {task_id}: {exc}")
                     raise RuntimeError(f"Wan poll {task_id}: too many transient errors: {exc}")
-                logger.warning(f"Transient error polling task {task_id}, retrying... ({transient}/8)")
-            
+
             # Simple async sleep
             import asyncio
             await asyncio.sleep(poll_interval)
-            
-    logger.error(f"⏱️ Video task {task_id} timed out after {timeout}s")
+
     raise TimeoutError(f"Wan task {task_id} not finished within {timeout}s")
 
 
@@ -248,9 +240,7 @@ async def download_file(url: str, dest: str | Path, retries: int = 4) -> Path:
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     last_err = None
-    
-    logger.info(f"⬇️ Downloading file from {url} to {dest}")
-    
+
     import asyncio
     async with httpx.AsyncClient() as client:
         for attempt in range(retries):
@@ -260,12 +250,9 @@ async def download_file(url: str, dest: str | Path, retries: int = 4) -> Path:
                     with open(dest, "wb") as f:
                         async for chunk in r.aiter_bytes(chunk_size=65536):
                             f.write(chunk)
-                    logger.info(f"✓ File downloaded successfully to {dest}")
-                    return dest
+                return dest
             except _TRANSIENT_EXCEPTIONS as exc:
                 last_err = exc
-                logger.warning(f"Download attempt {attempt+1}/{retries} failed: {exc}, retrying...")
                 await asyncio.sleep(2 * (attempt + 1))
-                
-    logger.error(f"❌ Download failed after {retries} attempts")
+
     raise RuntimeError(f"download failed after {retries} attempts: {last_err}")

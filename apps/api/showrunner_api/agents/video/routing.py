@@ -9,6 +9,29 @@ from showrunner_api.agents.quality.visual_critic import VisualCriticAgent
 from showrunner_api.llm_client import generate_video_t2v, download_file
 
 
+def _fallback_visual_prompt(shot: dict[str, Any]) -> str:
+    """Build a guaranteed non-empty T2V prompt from whatever fields a shot
+    does have. Mirrors the fallback in storyboard.py — kept here too since
+    this agent must never hand the video API an empty prompt regardless of
+    what upstream produced."""
+    camera_angle = str(shot.get("camera_angle") or "").strip()
+    action = str(shot.get("action") or "").strip()
+    dialogue = str(shot.get("dialogue") or "").strip()
+
+    parts = []
+    if camera_angle:
+        parts.append(f"{camera_angle} shot")
+    if action:
+        parts.append(action)
+    if dialogue:
+        parts.append(f'Character says: "{dialogue}"')
+
+    if parts:
+        return ". ".join(parts) + "."
+
+    return "Cinematic B2B narrative advertisement shot, well-lit, dynamic camera movement."
+
+
 class VideoRoutingAgent(BaseAgent):
     """
     Dispatches to video generators based on shot type.
@@ -22,7 +45,18 @@ class VideoRoutingAgent(BaseAgent):
         reference_clip_path: str | None,
         job_dir: str
     ) -> dict[str, Any]:
-        prompt = shot.get("prompt", "")
+        # FIXED: was `shot.get("prompt", "")` — StoryboardAgent never
+        # produced a "prompt" field at all (only shot_number, camera_angle,
+        # action, dialogue, estimated_duration_sec), so this silently sent
+        # an empty string to the video model whenever the LLM didn't
+        # spontaneously include one, causing Wan's
+        # "InvalidParameter: prompt must contain words" on that shot.
+        # StoryboardAgent now explicitly requests + guarantees a
+        # "visual_prompt" field (see storyboard.py); read that here, with
+        # the same synthesis-from-other-fields fallback as a second safety
+        # net in case a shot dict ever reaches this agent from somewhere
+        # else that doesn't go through StoryboardAgent's guarantee.
+        prompt = shot.get("visual_prompt") or _fallback_visual_prompt(shot)
         max_retries = 3
         attempts = 0
         best_clip = None
