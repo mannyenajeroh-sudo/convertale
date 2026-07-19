@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+@theme {
+  --color-border: #31333d;
+  --color-input: #31333d;
+  --color-ring: #f3b14b;
+
+  --color-background: #08090c;
+  --color-foreground: #f8f4ee;
+
+  --color-primary: #f3b14b;
+  --color-primary-foreground: #ffffff;
+
+  --color-secondary: #191a1f;
+  --color-secondary-foreground: #f8f4ee;
+
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+
+  --color-muted: #111216;
+  --color-muted-foreground: #b3b0aa;
+
+  --color-accent: #1b1d22;
+  --color-accent-foreground: #f8f4ee;
+
+  --color-popover: #111216;
+  --color-popover-foreground: #f8f4ee;
+
+  --color-card: #111216;
+  --color-card-foreground: #f8f4ee;
+
+  --color-brand-darker: #050608;
+  --color-brand-dark: #08090c;
+  --color-brand-card: #111216;
+  --color-brand-surface: #1b1d22;
+  --color-brand-ink: #0d1117;
+  --color-brand-warm: #f3b14b;
+  --color-brand-warm-light: #ffd08a;
+  --color-brand-magenta: #e35b84;
+  --color-brand-magenta-light: #ff8aa8;
+  --color-brand-cyan: #46c7d8;
+  --color-brand-cyan-light: #8be3ef;
+  --color-brand-green: #7ccf84;
+
+  --radius-lg: 0.5rem;
+  --radius-md: calc(0.5rem - 2px);
+  --radius-sm: calc(0.5rem - 4px);
+
+  --font-sans: var(--font-geist-sans), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), monospace;
+
+  --animate-fade-in: fade-in 0.4s ease-in;
+  --animate-glow: glow 2s ease-in-out infinite;
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes glow {
+    0%, 100% { box-shadow: 0 0 20px rgba(217, 70, 239, 0.3); }
+    50% { box-shadow: 0 0 40px rgba(217, 70, 239, 0.6); }
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+}

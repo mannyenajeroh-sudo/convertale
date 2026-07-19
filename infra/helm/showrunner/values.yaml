@@ -1,0 +1,34 @@
+image:
+  repository: registry.example.com/showrunner/api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+api:
+  replicas: 2
+  port: 8000
+
+worker:
+  replicas: 1
+
+redis:
+  image: redis:7-alpine
+  port: 6379
+
+env:
+  existingSecret: showrunner-env
+
+resources:
+  api:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  worker:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
