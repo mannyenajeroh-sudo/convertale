@@ -1,39 +1,39 @@
 ```
-# Python
-__pycache__/
+# Compiled and build artifacts
 *.pyc
-*.pyo
-*.pyd
+__pycache__/
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.class
+*.out
 
-# Environment variables
+# Dependencies
+.venv/
+venv/
 .env
+.env.local
+*.env.*
 
-# Logs
+# Logs and temp files
 *.log
-
-# Temporary files
 *.tmp
 *.swp
 *.swo
 
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
-# IDE
+# Editors
 .vscode/
 .idea/
 
-# Dependencies
-venv/
-.venv/
-node_modules/
-
-# Build artifacts
-dist/
+# Build directories
 build/
+dist/
 target/
+.gradle/
 .mypy_cache/
 .pytest_cache/
+coverage/
+htmlcov/
 ```

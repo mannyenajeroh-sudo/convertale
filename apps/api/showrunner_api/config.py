@@ -50,14 +50,15 @@ class Settings(BaseSettings):
 
     @field_validator("qwen_api_key", "dashscope_api_key", mode="before")
     @classmethod
-    def strip_dots_from_keys(cls, v: str | None) -> str | None:
-        """Remove any dots from API keys - they are visual separators only."""
+    def validate_api_keys(cls, v: str | None) -> str | None:
+        """Validate API keys are present and have correct format."""
         if v is None:
             return None
-        # Remove all dots from the key string
-        cleaned = v.replace(".", "")
-        if cleaned != v:
-            logger.warning(f"API key had dots removed: {v[:10]}... → {cleaned[:10]}...")
+        # Keep dots - they are part of the actual key format (sk-ws-X.XXXX.XXXX...)
+        # Just strip whitespace
+        cleaned = v.strip()
+        if not cleaned.startswith("sk-"):
+            logger.warning(f"API key doesn't start with 'sk-': {cleaned[:10]}...")
         return cleaned
 
     def __init__(self, **kwargs):
