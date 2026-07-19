@@ -1,7 +1,13 @@
 // ════════════════════════════════════════════════════════════════
 //  CONFIG
 // ════════════════════════════════════════════════════════════════
-const API = window.__CONVERTALE_API_URL__ || 'http://127.0.0.1:8080';
+// FIXED: default port was 8080 — the backend actually runs on 8000
+// (per every terminal log in this debugging session: "Uvicorn running on
+// http://127.0.0.1:8000"). Harmless if window.__CONVERTALE_API_URL__ is
+// always set correctly by app/dashboard/page.tsx, but a silent trap if it
+// isn't — every fetch would fail with a connection error against a port
+// nothing is listening on.
+const API = window.__CONVERTALE_API_URL__ || 'http://127.0.0.1:8000';
 // getAuthToken() is injected by app/dashboard/page.tsx (backed by Clerk's
 // useAuth().getToken()). The dashboard previously called the API with no
 // Authorization header at all, so every authenticated call (e.g.
@@ -45,6 +51,12 @@ for (const a of AGENTS) {
   railEl.appendChild(el);
   agentNodes[a.key] = el;
 }
+
+// FIXED: nothing previously tracked which project is currently active, so
+// the episode gallery had no way to know what to fetch — it just always
+// rendered the same hardcoded placeholder card instead.
+let currentProjectId = null;
+let episodePollTimer = null;
 
 let activeAgent = null;
 function setAgent(key) {
@@ -192,6 +204,14 @@ async function generateCampaign() {
       localStorage.setItem('cv_campaigns', JSON.stringify(campaigns));
       updateStats();
 
+      // FIXED: previously wrote `numEp` (whatever the user typed into the
+      // form) straight into the episode-count stat and left it there
+      // forever. Writers Room actually decides 3-5 episodes on its own —
+      // it doesn't even receive numEp as a parameter — so this number was
+      // frequently wrong and never corrected itself. Show the requested
+      // count as a provisional placeholder, then let startEpisodePolling /
+      // refreshEpisodes overwrite it with the real count once the backend
+      // reports one.
       document.getElementById('statEpisodes').textContent = numEp;
       document.getElementById('bibleSeriesId').textContent = projectId?.slice(0,8) || '';
       renderBible(protName, protLook, numEp);
@@ -202,6 +222,12 @@ async function generateCampaign() {
       log(`Campaign created: ${projectId}`, 'ok');
       dot.className = 'status-dot online';
       statusText.textContent = 'Pipeline queued';
+
+      // FIXED: this is the piece that was missing entirely — nothing ever
+      // polled the backend for real progress after submission, so the
+      // episode gallery just sat on its one hardcoded placeholder card
+      // forever, and "Refresh" had nothing real to refresh.
+      startEpisodePolling(projectId);
     } else {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${res.status}`);
@@ -252,22 +278,82 @@ function renderBible(name, look, epCount, identityScore) {
 // ════════════════════════════════════════════════════════════════
 //  EPISODE GALLERY
 // ════════════════════════════════════════════════════════════════
-function refreshEpisodes() {
+// FIXED: this function used to unconditionally overwrite the gallery with
+// one hardcoded "Episode 01 / Processing… / rendering" card — it never
+// fetched anything, so clicking "Refresh" (which calls this function)
+// always produced identical fake markup no matter what actually happened
+// on the backend. It now fetches real episode status from the endpoint
+// added in showrunner_api/routers/projects.py and renders from that.
+async function refreshEpisodes() {
   const gallery = document.getElementById('episodeGallery');
-  // Placeholder: in a real app, fetch /api/projects/:id/episodes
+
+  if (!currentProjectId) {
+    gallery.innerHTML = `<div style="color:var(--text-faint);font-size:13px;padding:20px 0;text-align:center;">No campaign commissioned yet.</div>`;
+    return;
+  }
+
+  let data;
+  try {
+    const res = await fetch(`${API}/api/projects/${currentProjectId}/episodes`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    data = await res.json();
+  } catch (e) {
+    gallery.innerHTML = `<div style="color:var(--red);font-size:13px;padding:20px 0;text-align:center;">Couldn't load episodes: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  // The real episode count is only known once Writers Room has actually
+  // run — update the stat card here instead of trusting the number typed
+  // into the form.
+  document.getElementById('statEpisodes').textContent = data.episode_count;
+
+  if (!data.episodes.length) {
+    gallery.innerHTML = `<div style="color:var(--text-faint);font-size:13px;padding:20px 0;text-align:center;">Writers Room is still drafting the episode list…</div>`;
+    return;
+  }
+
   gallery.innerHTML = `
     <div class="episode-grid">
-      <div class="ep-card" style="animation-delay:0ms">
-        <div style="width:100%;aspect-ratio:9/16;background:linear-gradient(180deg,#1a1040,#070810);display:flex;align-items:center;justify-content:center;max-height:220px">
-          <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="rgba(124,92,252,0.3)" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-        </div>
-        <div class="ep-card-body">
-          <div class="ep-num">Episode 01</div>
-          <div class="ep-title">Processing…</div>
-          <div class="ep-badge processing">⏳ rendering</div>
-        </div>
-      </div>
+      ${data.episodes.map((ep, i) => {
+        const isDone = ep.status === 'completed' && ep.assembled_video_url;
+        const num = String(ep.episode_number ?? i + 1).padStart(2, '0');
+        const badge = isDone
+          ? `<div class="ep-badge completed">✓ ready</div>`
+          : `<div class="ep-badge processing">⏳ ${escapeHtml(ep.status || 'rendering')}</div>`;
+        const thumb = isDone
+          ? `<video src="${escapeHtml(ep.assembled_video_url)}" controls preload="metadata" style="width:100%;aspect-ratio:9/16;max-height:220px;background:#070810;"></video>`
+          : `<div style="width:100%;aspect-ratio:9/16;background:linear-gradient(180deg,#1a1040,#070810);display:flex;align-items:center;justify-content:center;max-height:220px">
+               <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="rgba(124,92,252,0.3)" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+             </div>`;
+        return `
+          <div class="ep-card" style="animation-delay:${i * 60}ms">
+            ${thumb}
+            <div class="ep-card-body">
+              <div class="ep-num">Episode ${num}</div>
+              <div class="ep-title">${escapeHtml(ep.title || 'Untitled')}</div>
+              ${badge}
+            </div>
+          </div>`;
+      }).join('')}
     </div>`;
+
+  // Stop polling once every episode has finished — no point hammering the
+  // endpoint forever once there's nothing left to change.
+  const allDone = data.episodes.length > 0 && data.episodes.every(ep => ep.status === 'completed');
+  if (allDone && episodePollTimer) {
+    clearInterval(episodePollTimer);
+    episodePollTimer = null;
+    log('All episodes rendered.', 'ok');
+  }
+}
+
+function startEpisodePolling(projectId) {
+  currentProjectId = projectId;
+  if (episodePollTimer) clearInterval(episodePollTimer);
+  refreshEpisodes();
+  episodePollTimer = setInterval(refreshEpisodes, 5000);
 }
 
 // ════════════════════════════════════════════════════════════════

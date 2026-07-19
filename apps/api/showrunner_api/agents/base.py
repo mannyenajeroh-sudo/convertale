@@ -8,12 +8,6 @@ the shared plumbing every agent needs:
     registry, and token-budget manager
   * an ``AgentJob`` audit row per invocation (pending -> running -> success/error)
   * usage/token recording for cost accounting
-
-NOTE: This module previously did not exist in the codebase even though every
-agent and the test suite imported it (``from showrunner_api.agents.base
-import BaseAgent``) — that made the entire pipeline un-importable. This is
-the reconstructed implementation, inferred from how subclasses and
-``tests/test_base_agent.py`` use it.
 """
 
 from __future__ import annotations
@@ -85,8 +79,28 @@ class BaseAgent(ABC):
             started_at=datetime.now(timezone.utc),
         )
         self.db.add(job)
-        await self.db.commit()
-        await self.db.refresh(job)
+
+        # FIXED: this commit previously wasn't guarded. If it fails — most
+        # commonly a FK violation because episode_id was handed to us without
+        # a matching Episode row actually existing yet (see WritersRoomAgent)
+        # — the exception used to propagate with the session left mid-failed
+        # transaction. Since pipeline.py reuses one `db` session across every
+        # agent/episode in the loop, every *subsequent* episode would then
+        # also fail, with a confusing secondary error masking the real cause.
+        # Roll back explicitly so the session is usable again and the error
+        # that surfaces is the actual root cause.
+        try:
+            await self.db.commit()
+            await self.db.refresh(job)
+        except Exception:
+            await self.db.rollback()
+            logger.exception(
+                "Agent %s: failed to create AgentJob row (project=%s, episode=%s). "
+                "If episode_id is set, verify that episode actually exists and "
+                "was committed by a prior agent before this one ran.",
+                self.agent_name, project_id, episode_id,
+            )
+            raise
 
         # Give subclasses access to caller context without changing every
         # agent's method signature.
@@ -102,14 +116,30 @@ class BaseAgent(ABC):
             job.status = "error"
             job.error_text = str(exc)
             job.completed_at = datetime.now(timezone.utc)
-            await self.db.commit()
+            try:
+                await self.db.commit()
+            except Exception:
+                # If even the error-status commit fails, don't let that mask
+                # the original exception — roll back and let the original
+                # propagate.
+                await self.db.rollback()
+                logger.exception(
+                    "Agent %s: failed to record error status for job %s", self.agent_name, job.id
+                )
             logger.exception("Agent %s failed for project %s", self.agent_name, project_id)
             raise
 
         job.status = "error" if isinstance(result, dict) and "error" in result else "success"
         job.output_json = result
         job.completed_at = datetime.now(timezone.utc)
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            logger.exception(
+                "Agent %s: failed to commit final job status for job %s", self.agent_name, job.id
+            )
+            raise
         return result
 
     async def record_usage(
@@ -119,14 +149,7 @@ class BaseAgent(ABC):
         model: str,
         tokens: int,
     ) -> None:
-        """Record LLM token usage for cost accounting / budget enforcement.
-
-        NOTE: this method was previously named ``call_qwen`` on the base
-        class — an unfortunate name collision with the module-level
-        ``call_qwen()`` helper in ``llm_client.py`` that actually calls the
-        LLM. Renamed to ``record_usage`` to make its purpose unambiguous;
-        all agents have been updated to call it under the new name.
-        """
+        """Record LLM token usage for cost accounting / budget enforcement."""
         self.db.add(
             UsageRecord(
                 workspace_id=workspace_id,
@@ -136,4 +159,9 @@ class BaseAgent(ABC):
                 model=model,
             )
         )
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            logger.exception("Agent %s: failed to commit usage record", self.agent_name)
+            raise

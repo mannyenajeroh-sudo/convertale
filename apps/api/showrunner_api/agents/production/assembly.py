@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import os
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -12,6 +14,20 @@ from showrunner_api.agents.base import BaseAgent
 from showrunner_api.models import Episode
 
 logger = logging.getLogger(__name__)
+
+# FIXED: previously the final URL was a stub pointing at https://example.com/...
+# which never hosted anything, so the dashboard had no real video to play.
+# job_dir lives under tempfile.mkdtemp() (see routing.py), which the OS can
+# clean up at any time — so we also copy the finished file out to a
+# persistent, servable directory instead of leaving it only in temp.
+#
+# Requires mounting this directory in main.py, e.g.:
+#     from fastapi.staticfiles import StaticFiles
+#     from showrunner_api.agents.production.assembly import MEDIA_DIR
+#     app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
+MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "media")).resolve()
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://localhost:8000").rstrip("/")
 
 _SUB_STYLE = (
     "FontSize=14,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,"
@@ -61,6 +77,12 @@ def _write_srt(shots: list[dict], durations: list[float], srt_path: Path) -> Non
             offset += dur
 
 
+def _persist_to_media_sync(src_path: str, output_name: str) -> Path:
+    dest = MEDIA_DIR / output_name
+    shutil.copy2(src_path, dest)
+    return dest
+
+
 class AssemblyAgent(BaseAgent):
     """
     Concatenates clips and burns subtitles to create the final assembled episode MP4.
@@ -72,17 +94,17 @@ class AssemblyAgent(BaseAgent):
         # tracking; this method itself doesn't need them directly.
         _workspace_id = uuid.UUID(input_json["_workspace_id"])
         _project_id = uuid.UUID(input_json["_project_id"]) if "_project_id" in input_json else None
-        
+
         episode_id_str = input_json.get("episode_id")
         clips = input_json.get("clips", [])
         job_dir = input_json.get("job_dir")
-        
+
         if not episode_id_str or not clips or not job_dir:
             return {"error": "episode_id, clips, and job_dir are required"}
-            
+
         episode_id = uuid.UUID(episode_id_str)
         job_path = Path(job_dir)
-        
+
         # 1. concat list
         concat_list_path = job_path / "concat_list.txt"
         with open(concat_list_path, "w") as f:
@@ -90,7 +112,7 @@ class AssemblyAgent(BaseAgent):
                 # clip should contain clip_path
                 p = Path(clip["clip_path"]).resolve()
                 f.write(f"file '{p}'\n")
-                
+
         await asyncio.to_thread(
             subprocess.run,
             [
@@ -101,12 +123,12 @@ class AssemblyAgent(BaseAgent):
             capture_output=True,
             cwd=str(job_path),
         )
-        
+
         # 2. subs
         durations = [await _duration(c["clip_path"]) for c in clips]
         srt_path = job_path / "subs.srt"
         _write_srt(clips, durations, srt_path)
-        
+
         # 3. burn
         output_name = f"episode_{episode_id.hex[:8]}.mp4"
         await asyncio.to_thread(
@@ -121,12 +143,16 @@ class AssemblyAgent(BaseAgent):
             capture_output=True,
             cwd=str(job_path),
         )
-        
-        final_video_path = str(job_path / output_name)
-        
-        # In a real app, upload final_video_path to OSS and get public URL
-        final_video_url = f"https://example.com/assets/{output_name}"
-        
+
+        rendered_path = str(job_path / output_name)
+
+        # FIXED: copy out of the (possibly ephemeral) job_dir into a durable,
+        # servable media directory, and build a real URL the browser can
+        # actually reach — instead of the previous stub example.com URL.
+        persisted_path = await asyncio.to_thread(_persist_to_media_sync, rendered_path, output_name)
+        final_video_path = str(persisted_path)
+        final_video_url = f"{BACKEND_BASE_URL}/media/{output_name}"
+
         # Update episode status
         result = await self.db.execute(select(Episode).where(Episode.id == episode_id))
         episode = result.scalars().first()
@@ -134,7 +160,7 @@ class AssemblyAgent(BaseAgent):
             episode.status = "completed"
             episode.assembled_video_url = final_video_url
             await self.db.commit()
-            
+
         return {
             "status": "completed",
             "assembled_video_path": final_video_path,

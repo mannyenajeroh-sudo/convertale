@@ -18,7 +18,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
+from showrunner_api.agents.production.assembly import MEDIA_DIR
 from showrunner_api.config import get_settings
 from showrunner_api.infra.neo4j_driver import neo4j_client
 from showrunner_api.routers import campaigns, gate, health, me, webhooks
@@ -56,6 +58,14 @@ def create_app() -> FastAPI:
     app.include_router(campaigns.router)
     app.include_router(gate.router)
     app.include_router(webhooks.router)
+
+    # FIXED: AssemblyAgent now writes finished episode MP4s to MEDIA_DIR and
+    # builds real "http://localhost:8000/media/<file>" URLs for them (see
+    # assembly.py), but nothing was ever mounting that directory — so those
+    # URLs 404'd instead of serving anything. This is why the dashboard
+    # still showed no playable video even after the URL stopped being a
+    # stub example.com link.
+    app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 
     return app
 

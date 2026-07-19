@@ -16,9 +16,9 @@ class VideoRoutingAgent(BaseAgent):
     """
 
     async def _render_with_retry(
-        self, 
-        shot: dict[str, Any], 
-        critic: VisualCriticAgent, 
+        self,
+        shot: dict[str, Any],
+        critic: VisualCriticAgent,
         reference_clip_path: str | None,
         job_dir: str
     ) -> dict[str, Any]:
@@ -27,7 +27,8 @@ class VideoRoutingAgent(BaseAgent):
         attempts = 0
         best_clip = None
         best_score = 0.0
-        
+        engine = "Wan (Qwen Cloud)"  # FIXED: default so it's always defined even if the loop body changes later
+
         while attempts < max_retries:
             attempts += 1
             # 1. Render
@@ -42,7 +43,7 @@ class VideoRoutingAgent(BaseAgent):
                     size="720*1280",
                     duration=5
                 )
-                
+
             dest = os.path.join(job_dir, f"shot_{shot.get('shot_number', 0)}_{attempts}.mp4")
             if "example.com" not in clip_url:
                 clip_path = str(await download_file(clip_url, dest))
@@ -60,12 +61,12 @@ class VideoRoutingAgent(BaseAgent):
                 reference_clip_path=reference_clip_path,
                 threshold=0.6
             )
-            
+
             score = verdict["score"]
-            if score > best_score:
+            if score > best_score or best_clip is None:
                 best_score = score
                 best_clip = clip_path
-                
+
             if verdict["passed"]:
                 return {
                     "shot_number": shot.get("shot_number"),
@@ -73,18 +74,26 @@ class VideoRoutingAgent(BaseAgent):
                     "clip_path": clip_path,
                     "score": score,
                     "attempts": attempts,
+                    "passed": True,
                 }
-                
+
             # Optimizer rewriting
             if verdict["revised_prompt"]:
                 prompt = verdict["revised_prompt"]
-                
+
+        # FIXED: previously this could return clip_path=None if every attempt
+        # failed to extract a frame/produce a clip at all (best_clip stays None).
+        # assembly.py does Path(clip["clip_path"]) unconditionally and would
+        # crash on that. We now guarantee a path (falling back to the last
+        # attempted clip) and flag the shot as not passed so callers can decide
+        # whether to proceed, retry the whole shot, or surface it to the user.
         return {
             "shot_number": shot.get("shot_number"),
             "engine_used": engine,
-            "clip_path": best_clip,
+            "clip_path": best_clip if best_clip is not None else clip_path,
             "score": best_score,
             "attempts": attempts,
+            "passed": False,
         }
 
     async def run(self, input_json: dict[str, Any]) -> dict[str, Any]:
@@ -96,19 +105,31 @@ class VideoRoutingAgent(BaseAgent):
         shots = input_json.get("shots", [])
         if not shots:
             return {"error": "shots list is required"}
-            
+
         critic = VisualCriticAgent(db=self.db, graph=self.graph, mcp=self.mcp, token_budget=self.token_budget)
-        
+
         job_dir = tempfile.mkdtemp(prefix="convertale_job_")
-        
+
         # Parallelize rendering
         tasks = []
         # For simplicity, no reference clip passed here. In a real scenario, we'd pass a locked character reference.
-        reference_clip_path = input_json.get("reference_clip_path") 
-        
+        reference_clip_path = input_json.get("reference_clip_path")
+
         for shot in shots:
             tasks.append(self._render_with_retry(shot, critic, reference_clip_path, job_dir))
-            
+
         generated_clips = await asyncio.gather(*tasks)
-            
+
+        failed_shots = [c for c in generated_clips if not c.get("passed", True)]
+        if failed_shots:
+            # Don't silently hand these to AssemblyAgent as if they were fine —
+            # at minimum surface which shots never passed the continuity critic.
+            shot_numbers = [c.get("shot_number") for c in failed_shots]
+            return {
+                "clips": generated_clips,
+                "status": "completed_with_warnings",
+                "job_dir": job_dir,
+                "failed_shot_numbers": shot_numbers,
+            }
+
         return {"clips": generated_clips, "status": "completed", "job_dir": job_dir}
