@@ -16,6 +16,7 @@ dist/
 build/
 target/
 *.egg-info/
+.next/
 
 # Logs
 *.log
