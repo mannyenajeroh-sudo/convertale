@@ -160,6 +160,25 @@ const DASHBOARD_BODY_HTML = String.raw`
               <div style="margin-top:6px">
                 <input type="text" id="protLook" placeholder="Locked appearance (e.g. 30s woman, short black bob, charcoal trench coat…)" />
               </div>
+              <!-- Character Image Upload Section -->
+              <div class="character-upload-section" style="margin-top:12px;padding:12px;background:var(--surface-2);border-radius:8px;border:1px dashed var(--border);">
+                <label class="field-label" style="margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  Character Reference Image (Optional)
+                </label>
+                <div class="upload-area" id="characterUploadArea" style="position:relative;">
+                  <input type="file" id="characterImage" accept="image/*" style="display:none;" onchange="handleCharacterImageSelect(this)" />
+                  <div class="upload-placeholder" id="uploadPlaceholder" onclick="document.getElementById('characterImage').click()" style="cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;text-align:center;">
+                    <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="var(--text-faint)" stroke-width="1.5" style="margin-bottom:8px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+                    <div style="font-size:12px;color:var(--text-faint);">Click to upload or drag and drop</div>
+                    <div style="font-size:10px;color:var(--text-faint);margin-top:4px;">PNG, JPG up to 5MB</div>
+                  </div>
+                  <div class="upload-preview" id="uploadPreview" style="display:none;">
+                    <img id="previewImage" src="" alt="Character preview" style="max-width:100%;max-height:150px;border-radius:6px;display:block;margin:0 auto;" />
+                    <button class="btn btn-secondary" onclick="removeCharacterImage(event)" style="margin-top:8px;font-size:11px;padding:4px 10px;">Remove</button>
+                  </div>
+                </div>
+              </div>
             </div>
             <button class="btn btn-primary" id="generateBtn" onclick="generateCampaign()">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>

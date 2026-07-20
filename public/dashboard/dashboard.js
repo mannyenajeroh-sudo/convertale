@@ -119,6 +119,81 @@ function updateStats() {
 updateStats();
 
 // ════════════════════════════════════════════════════════════════
+//  CHARACTER IMAGE UPLOAD HANDLING
+// ════════════════════════════════════════════════════════════════
+let selectedCharacterFile = null;
+
+function handleCharacterImageSelect(input) {
+  const file = input.files[0];
+  if (!file) return;
+  
+  // Validate file size (5MB max)
+  const maxSize = 5 * 1024 * 1024;
+  if (file.size > maxSize) {
+    alert('File size must be less than 5MB');
+    input.value = '';
+    return;
+  }
+  
+  // Validate file type
+  if (!file.type.startsWith('image/')) {
+    alert('Please select an image file');
+    input.value = '';
+    return;
+  }
+  
+  selectedCharacterFile = file;
+  
+  // Show preview
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    document.getElementById('previewImage').src = e.target.result;
+    document.getElementById('uploadPlaceholder').style.display = 'none';
+    document.getElementById('uploadPreview').style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+}
+
+function removeCharacterImage(event) {
+  event.stopPropagation();
+  selectedCharacterFile = null;
+  document.getElementById('characterImage').value = '';
+  document.getElementById('uploadPlaceholder').style.display = 'flex';
+  document.getElementById('uploadPreview').style.display = 'none';
+}
+
+// Drag and drop support
+const uploadArea = document.getElementById('characterUploadArea');
+if (uploadArea) {
+  uploadArea.addEventListener('dragover', function(e) {
+    e.preventDefault();
+    this.style.borderColor = 'var(--accent)';
+    this.style.background = 'var(--surface-3)';
+  });
+  
+  uploadArea.addEventListener('dragleave', function(e) {
+    e.preventDefault();
+    this.style.borderColor = 'var(--border)';
+    this.style.background = 'var(--surface-2)';
+  });
+  
+  uploadArea.addEventListener('drop', function(e) {
+    e.preventDefault();
+    this.style.borderColor = 'var(--border)';
+    this.style.background = 'var(--surface-2)';
+    
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith('image/')) {
+      const input = document.getElementById('characterImage');
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(file);
+      input.files = dataTransfer.files;
+      handleCharacterImageSelect(input);
+    }
+  });
+}
+
+// ════════════════════════════════════════════════════════════════
 //  GENERATE CAMPAIGN
 // ════════════════════════════════════════════════════════════════
 async function generateCampaign() {
@@ -166,19 +241,23 @@ async function generateCampaign() {
   }, 900);
 
   try {
-    const payload = {
-      raw_brief: rawBrief,
-      title: title || 'New Campaign',
-      workspace_id: workspaceId,
-      protagonist_name: protName,
-      protagonist_look: protLook,
-      n_episodes: numEp,
-    };
+    // Use FormData for multipart/form-data when file is included
+    const formData = new FormData();
+    formData.append('raw_brief', rawBrief);
+    formData.append('title', title || 'New Campaign');
+    formData.append('workspace_id', workspaceId);
+    formData.append('protagonist_name', protName);
+    formData.append('protagonist_look', protLook);
+    formData.append('n_episodes', numEp.toString());
+    
+    if (selectedCharacterFile) {
+      formData.append('character_image', selectedCharacterFile);
+    }
 
     const res = await fetch(`${API}/api/campaigns`, {
       method: 'POST',
-      headers: await authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(payload),
+      headers: await authHeaders({}), // Don't set Content-Type - browser will set it with boundary
+      body: formData,
     });
 
     clearInterval(stepInterval);
@@ -194,7 +273,7 @@ async function generateCampaign() {
 
       document.getElementById('statEpisodes').textContent = numEp;
       document.getElementById('bibleSeriesId').textContent = projectId?.slice(0,8) || '';
-      renderBible(protName, protLook, numEp);
+      renderBible(protName, protLook, numEp, null, data.character_image_url);
 
       resultEl.style.display = 'block';
       resultEl.style.color = 'var(--green)';
@@ -202,6 +281,11 @@ async function generateCampaign() {
       log(`Campaign created: ${projectId}`, 'ok');
       dot.className = 'status-dot online';
       statusText.textContent = 'Pipeline queued';
+      
+      // Clear the uploaded file after successful submission
+      if (selectedCharacterFile) {
+        removeCharacterImage(new Event('click'));
+      }
     } else {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${res.status}`);
@@ -223,13 +307,19 @@ async function generateCampaign() {
 // ════════════════════════════════════════════════════════════════
 //  SERIES BIBLE RENDER
 // ════════════════════════════════════════════════════════════════
-function renderBible(name, look, epCount, identityScore) {
+function renderBible(name, look, epCount, identityScore, characterImageUrl) {
   const el = document.getElementById('bibleContent');
   if (!name) { el.innerHTML = '<div class="bible-empty">No series commissioned yet.</div>'; return; }
+  
+  const hasCharacterImage = characterImageUrl != null && characterImageUrl !== '';
+  
   el.innerHTML = `
     <div class="bible-card">
       <div class="char-thumbnail">
-        <div class="ph-text">Reference frame appears when Wan renders complete</div>
+        ${hasCharacterImage 
+          ? `<img src="${characterImageUrl}" alt="Character reference" style="width:100%;height:100%;object-fit:cover;border-radius:6px;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"/>`
+          : '<div class="ph-text">Reference frame appears when Wan renders complete</div>'
+        }
       </div>
       <div class="char-info">
         <div class="char-name-row">
