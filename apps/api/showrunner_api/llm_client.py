@@ -23,6 +23,10 @@ if settings.effective_dashscope_key:
 else:
     logger.warning("No QWEN_API_KEY or DASHSCOPE_API_KEY configured - API calls will return stub responses")
 
+# Video duration constraints
+MIN_VIDEO_DURATION_SEC = 3
+MAX_VIDEO_DURATION_SEC = 10
+
 _TRANSIENT_EXCEPTIONS = (
     httpx.ConnectError,
     httpx.TimeoutException,
