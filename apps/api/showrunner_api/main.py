@@ -31,6 +31,18 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Log configuration on startup
+    settings = get_settings()
+    logger.info(f"Starting Convertale API v{settings.app_version} in {settings.app_env} mode")
+    
+    # Verify Qwen configuration
+    if settings.qwen_api_key or settings.dashscope_api_key:
+        key_type = "workspace" if (settings.qwen_api_key or settings.dashscope_api_key).startswith("sk-ws-") else "standard"
+        logger.info(f"Qwen/DashScope configured with {key_type} key")
+        logger.info(f"Base URL: {settings.qwen_base_url}")
+    else:
+        logger.warning("⚠️  No Qwen/DashScope API key configured - LLM features will use stub responses")
+    
     yield
     # Cleanly release the Neo4j driver's connection pool on shutdown.
     await neo4j_client.close()

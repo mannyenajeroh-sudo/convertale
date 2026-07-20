@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 4, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/User/OneDrive/Desktop/convertale-production-ready%20%281%29/node_modules/.pnpm/%40clerk%2Bnextjs%407.5.12_next%401_8441df0b078cb5234a723a78da54bf92/node_modules/%40clerk/nextjs/src/server/keyless-log-cache.ts"],"sourcesContent":["/**\n * Re-export keyless development cache utilities from shared.\n * This maintains backward compatibility with existing imports.\n */\nexport {\n  clerkDevelopmentCache,\n  createClerkDevCache,\n  createConfirmationMessage,\n  createKeylessModeMessage,\n} from '@clerk/shared/keyless';\n"],"names":[],"mappings":";AAIA"}}]
+}

@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 13, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/User/OneDrive/Desktop/convertale-production-ready%20%281%29/app/favicon.ico.mjs%20%28structured%20image%20object%29"],"sourcesContent":["import src from \"IMAGE\";\nexport default { src, width: 256, height: 256 }\n"],"names":["src","width","height"],"mappings":";;;;AAAA;;uCACe;IAAEA,KAAAA,mIAAG;IAAEC,OAAO;IAAKC,QAAQ;AAAI"}},
+    {"offset": {"line": 28, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/User/OneDrive/Desktop/convertale-production-ready%20%281%29/app/sign-in/%5B%5B...sign-in%5D%5D/page.tsx"],"sourcesContent":["import { SignIn } from \"@clerk/nextjs\";\n\nexport default function SignInPage() {\n  return (\n    <div className=\"flex min-h-screen items-center justify-center\">\n      <SignIn />\n    </div>\n  );\n}\n"],"names":["SignInPage","className"],"mappings":";;;;;AAAA;;;AAEe,SAASA;IACtB,qBACE,6VAAC;QAAIC,WAAU;kBACb,cAAA,6VAAC,0SAAM;;;;;;;;;;AAGb"}}]
+}

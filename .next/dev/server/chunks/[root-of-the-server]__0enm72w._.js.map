@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 88, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/User/OneDrive/Desktop/convertale-production-ready%20%281%29/proxy.ts"],"sourcesContent":["import { clerkMiddleware, createRouteMatcher } from \"@clerk/nextjs/server\";\n\nconst isPublicRoute = createRouteMatcher([\n  \"/\",\n  \"/products(.*)\",\n  \"/features(.*)\",\n  \"/enterprise(.*)\",\n  \"/showcase(.*)\",\n  \"/about(.*)\",\n  \"/sign-in(.*)\",\n  \"/sign-up(.*)\",\n  \"/api/webhooks(.*)\",\n]);\n\nexport const proxy = clerkMiddleware(async (auth, req) => {\n  if (!isPublicRoute(req)) {\n    await auth.protect();\n  }\n});\n\nexport const config = {\n  matcher: [\"/((?!_next|.*\\\\..*).*)\", \"/__clerk/:path*\"],\n};\r\n"],"names":["isPublicRoute","proxy","auth","req","protect","config","matcher"],"mappings":";;;;;;AAAA;AAAA;;AAEA,MAAMA,gBAAgB,IAAA,0SAAkB,EAAC;IACvC;IACA;IACA;IACA;IACA;IACA;IACA;IACA;IACA;CACD;AAEM,MAAMC,QAAQ,IAAA,0SAAe,EAAC,OAAOC,MAAMC;IAChD,IAAI,CAACH,cAAcG,MAAM;QACvB,MAAMD,KAAKE,OAAO;IACpB;AACF;AAEO,MAAMC,SAAS;IACpBC,SAAS;QAAC;QAA0B;KAAkB;AACxD"}}]
+}

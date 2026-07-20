@@ -54,6 +54,10 @@ class Project(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    # Character reference fields for locked appearance across episodes
+    protagonist_name: Mapped[str | None] = mapped_column(String)
+    protagonist_look: Mapped[str | None] = mapped_column(Text)
+    protagonist_image_url: Mapped[str | None] = mapped_column(Text)
 
     workspace: Mapped[Workspace] = relationship(back_populates="projects")
 
