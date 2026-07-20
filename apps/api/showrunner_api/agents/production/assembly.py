@@ -83,10 +83,22 @@ def _persist_to_media_sync(src_path: str, output_name: str) -> Path:
     return dest
 
 
+# Logo overlay tuning: small, corner-anchored, slightly transparent so it
+# reads as a channel bug / brand watermark rather than covering the shot.
+# 12% of frame width scales sensibly across different logo aspect ratios;
+# 85% opacity and a soft drop shadow keep it visible over both light and
+# dark backgrounds without looking pasted-on.
+_LOGO_WIDTH_FRACTION = 0.16
+_LOGO_MARGIN_PX = 28
+_LOGO_OPACITY = 0.85
+
+
 class AssemblyAgent(BaseAgent):
     """
-    Concatenates clips and burns subtitles to create the final assembled episode MP4.
-    Updates the Episode record in the DB with the final URL.
+    Concatenates clips, burns subtitles, and (if a brand logo is set for the
+    project) composites it as a corner watermark to create the final
+    assembled episode MP4. Updates the Episode record in the DB with the
+    final URL.
     """
 
     async def run(self, input_json: dict[str, Any]) -> dict[str, Any]:
@@ -98,12 +110,41 @@ class AssemblyAgent(BaseAgent):
         episode_id_str = input_json.get("episode_id")
         clips = input_json.get("clips", [])
         job_dir = input_json.get("job_dir")
+        # Optional: path to the project's uploaded brand logo (see
+        # routers/brand_assets.py + Project.brand_logo_path). None/missing
+        # file both degrade gracefully to "no watermark" rather than failing
+        # the whole episode's assembly.
+        logo_path = input_json.get("logo_path")
 
         if not episode_id_str or not clips or not job_dir:
             return {"error": "episode_id, clips, and job_dir are required"}
 
         episode_id = uuid.UUID(episode_id_str)
         job_path = Path(job_dir)
+
+        # FIXED: previously a missing ffmpeg/ffprobe install surfaced as a raw
+        # FileNotFoundError ("[WinError 2] The system cannot find the file
+        # specified" on Windows) from deep inside asyncio.to_thread(subprocess.run),
+        # which propagated up through execute() and killed the whole background
+        # pipeline task with an unhandled-exception traceback. Check up front and
+        # return a normal {"error": ...} result instead, so pipeline.py's existing
+        # `if "error" in assembly_result` handling can log it cleanly and move on
+        # to the next episode instead of the whole run aborting.
+        missing = [exe for exe in ("ffmpeg", "ffprobe") if shutil.which(exe) is None]
+        if missing:
+            return {
+                "error": (
+                    f"{' and '.join(missing)} not found on PATH. Install ffmpeg "
+                    "(which bundles ffprobe) and ensure its bin/ directory is on "
+                    "this machine's PATH, then restart the API server so the new "
+                    "PATH is picked up."
+                )
+            }
+
+        logo_file = Path(logo_path).resolve() if logo_path else None
+        use_logo = bool(logo_file and logo_file.exists())
+        if logo_path and not use_logo:
+            logger.warning(f"logo_path set ({logo_path}) but file not found on disk; skipping watermark")
 
         # 1. concat list
         concat_list_path = job_path / "concat_list.txt"
@@ -129,20 +170,58 @@ class AssemblyAgent(BaseAgent):
         srt_path = job_path / "subs.srt"
         _write_srt(clips, durations, srt_path)
 
-        # 3. burn
+        # 3. burn subtitles + (optionally) composite the logo watermark, in a
+        # single ffmpeg pass. Combining both into one filter_complex avoids a
+        # second full re-encode of the episode just to add a watermark.
         output_name = f"episode_{episode_id.hex[:8]}.mp4"
-        await asyncio.to_thread(
-            subprocess.run,
-            [
-                "ffmpeg", "-y", "-i", "concat.mp4", "-vf",
-                f"subtitles=subs.srt:force_style='{_SUB_STYLE}'",
+        subtitles_filter = f"subtitles=subs.srt:force_style='{_SUB_STYLE}'"
+
+        if use_logo:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", "concat.mp4",
+                "-i", str(logo_file),
+                "-filter_complex",
+                (
+                    f"[1:v]scale=iw*{_LOGO_WIDTH_FRACTION}:-1,format=rgba,"
+                    f"colorchannelmixer=aa={_LOGO_OPACITY}[wm];"
+                    f"[0:v][wm]overlay=W-w-{_LOGO_MARGIN_PX}:H-h-{_LOGO_MARGIN_PX}:format=auto[ov];"
+                    f"[ov]{subtitles_filter}[outv]"
+                ),
+                "-map", "[outv]",
+                "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                output_name,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-i", "concat.mp4", "-vf", subtitles_filter,
                 "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
                 output_name
-            ],
-            check=True,
-            capture_output=True,
-            cwd=str(job_path),
-        )
+            ]
+
+        try:
+            await asyncio.to_thread(
+                subprocess.run, cmd, check=True, capture_output=True, cwd=str(job_path),
+            )
+        except subprocess.CalledProcessError as exc:
+            if use_logo:
+                # Don't let a bad/corrupt logo file (wrong format, 0 bytes,
+                # unsupported codec) take down the whole episode — retry once
+                # without the watermark rather than failing assembly outright.
+                logger.error(
+                    "Logo overlay pass failed (%s); retrying without watermark: %s",
+                    logo_file, exc.stderr,
+                )
+                fallback_cmd = [
+                    "ffmpeg", "-y", "-i", "concat.mp4", "-vf", subtitles_filter,
+                    "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+                    output_name
+                ]
+                await asyncio.to_thread(
+                    subprocess.run, fallback_cmd, check=True, capture_output=True, cwd=str(job_path),
+                )
+            else:
+                raise
 
         rendered_path = str(job_path / output_name)
 

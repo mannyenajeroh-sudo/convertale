@@ -23,13 +23,34 @@ async def create_campaign(
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """
-    Create a new campaign and start the background pipeline.
-    Expects: { raw_brief, title, workspace_id, protagonist_name, protagonist_look, n_episodes }
-    Returns: { project_id, status: "queued" }
+    Create a new campaign.
+    Expects: { raw_brief, title, workspace_id, autostart? }
+    Returns: { project_id, status }
+
+    autostart (default true, backward-compatible): if true, the background
+    pipeline is dispatched immediately, exactly as before. Pass
+    `autostart: false` when the caller needs to upload character-lock
+    reference images and/or a brand logo first (see routers/characters.py,
+    routers/brand_assets.py) — the pipeline reads locked characters/logo
+    at the start of episode 1, so anything uploaded after dispatch races
+    the render and may lose. When autostart is false, the returned status
+    is "draft"; call POST /api/projects/{project_id}/start once uploads
+    are done to kick off the pipeline.
+
+    NOTE: `protagonist_name` / `protagonist_look` / `n_episodes` are no
+    longer read here — they were silently dropped by this handler before
+    (the model has no columns for them and nothing downstream ever read
+    them off this payload). Protagonist identity is now set via the
+    character-lock upload endpoint, which is the thing that actually
+    reaches storyboard/routing. `n_episodes` still isn't wired into the
+    pipeline (run_campaign_pipeline hardcodes its episode count) — that's
+    a separate, pre-existing gap in the Writers Room step this endpoint
+    can't fix on its own.
     """
     raw_brief = payload.get("raw_brief")
     title = payload.get("title", "Untitled Campaign")
     workspace_id_str = payload.get("workspace_id")
+    autostart = payload.get("autostart", True)
 
     if not raw_brief or not workspace_id_str:
         raise HTTPException(status_code=400, detail="Missing raw_brief or workspace_id")
@@ -64,13 +85,18 @@ async def create_campaign(
         workspace_id=workspace_id,
         title=title,
         concept_prompt=raw_brief,
-        status="queued",
+        status="draft" if not autostart else "queued",
     )
 
     db.add(project)
     await db.commit()
 
-    logger.info("Created project %s for user %s", project_id, owner_ref)
+    logger.info("Created project %s for user %s (autostart=%s)", project_id, owner_ref, autostart)
+
+    if not autostart:
+        # Caller (dashboard) will upload character locks / logo, then call
+        # POST /api/projects/{project_id}/start explicitly.
+        return {"project_id": str(project_id), "status": "draft"}
 
     # FIXED: was `background_tasks.add_task(run_campaign_pipeline_task, ...)`.
     # BackgroundTasks runs sync callables in a worker thread, which forced
@@ -86,6 +112,45 @@ async def create_campaign(
     )
 
     return {"project_id": str(project_id), "status": "queued"}
+
+
+@router.post("/projects/{project_id}/start")
+async def start_campaign(
+    project_id: uuid.UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """
+    Dispatches the background pipeline for a project created with
+    `autostart: false`. Exists so the dashboard can create the project,
+    upload character-lock reference images and/or a brand logo, and only
+    then let episode 1 start rendering — closing the race where a shot
+    could be generated (and pass the now-real Visual Critic with no
+    reference to check against) before the user's upload lands.
+
+    Idempotent against double-clicks: if the project isn't in "draft"
+    status, this is a no-op that reports the current status rather than
+    dispatching a second pipeline run.
+    """
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.status != "draft":
+        return {"project_id": str(project_id), "status": project.status, "already_started": True}
+
+    project.status = "queued"
+    await db.commit()
+
+    dispatch_campaign_pipeline(
+        project_id=str(project_id),
+        workspace_id=str(project.workspace_id),
+        raw_brief=project.concept_prompt,
+    )
+
+    logger.info("Started pipeline for project %s", project_id)
+    return {"project_id": str(project_id), "status": "queued", "already_started": False}
 
 
 @router.get("/projects/{project_id}/episodes")

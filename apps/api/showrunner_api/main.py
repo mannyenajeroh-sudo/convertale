@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from showrunner_api.agents.production.assembly import MEDIA_DIR
 from showrunner_api.config import get_settings
 from showrunner_api.infra.neo4j_driver import neo4j_client
-from showrunner_api.routers import campaigns, gate, health, me, webhooks
+from showrunner_api.routers import brand_assets, campaigns, characters, gate, health, me, webhooks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -58,6 +58,8 @@ def create_app() -> FastAPI:
     app.include_router(campaigns.router)
     app.include_router(gate.router)
     app.include_router(webhooks.router)
+    app.include_router(characters.router)
+    app.include_router(brand_assets.router)
 
     # FIXED: AssemblyAgent now writes finished episode MP4s to MEDIA_DIR and
     # builds real "http://localhost:8000/media/<file>" URLs for them (see

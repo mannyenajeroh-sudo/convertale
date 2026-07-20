@@ -102,6 +102,23 @@ class BaseAgent(ABC):
             )
             raise
 
+        # FIXED: job.id was previously read again in the except: blocks below,
+        # AFTER a self.db.rollback(). Session.rollback() unconditionally expires
+        # every ORM object in the session (this is independent of the session's
+        # expire_on_commit setting, which only governs commit()) — so job.id
+        # becomes a lazy attribute that needs a fresh DB round-trip on next
+        # access. That round-trip requires SQLAlchemy's async greenlet bridge,
+        # which isn't active during plain synchronous attribute access (e.g.
+        # inside a logging call's argument list) — raising
+        # "MissingGreenlet: greenlet_spawn has not been called" and masking
+        # whatever the real error was (seen in practice: a dropped Postgres
+        # connection during a long Video Routing step surfaced only as this
+        # confusing secondary greenlet error). job.id is a client-side UUID
+        # (see AgentJob.id's `default=uuid.uuid4`), already known before the
+        # first commit even runs, so caching it here avoids ever touching the
+        # ORM object for it again.
+        job_id = job.id
+
         # Give subclasses access to caller context without changing every
         # agent's method signature.
         enriched_input = {
@@ -124,7 +141,7 @@ class BaseAgent(ABC):
                 # propagate.
                 await self.db.rollback()
                 logger.exception(
-                    "Agent %s: failed to record error status for job %s", self.agent_name, job.id
+                    "Agent %s: failed to record error status for job %s", self.agent_name, job_id
                 )
             logger.exception("Agent %s failed for project %s", self.agent_name, project_id)
             raise
@@ -137,7 +154,7 @@ class BaseAgent(ABC):
         except Exception:
             await self.db.rollback()
             logger.exception(
-                "Agent %s: failed to commit final job status for job %s", self.agent_name, job.id
+                "Agent %s: failed to commit final job status for job %s", self.agent_name, job_id
             )
             raise
         return result

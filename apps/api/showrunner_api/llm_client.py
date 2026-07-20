@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 import time
@@ -8,10 +9,23 @@ from typing import Any
 import dashscope
 import httpx
 from dashscope import VideoSynthesis
+from dashscope.common.error import InvalidTask
 
 from showrunner_api.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# FIXED: the free-tier wan2.6-t2v endpoint throttles task *creation*
+# (429 Throttling.RateQuota), not just total account usage. Firing all of
+# an episode's shots at once via VideoRoutingAgent's asyncio.gather()
+# reliably tripped this. Alibaba still *accepts and runs* whichever
+# submissions land under the limit, so a naive "just raise" here burns
+# real quota on jobs the app then abandons the moment the first 429
+# propagates. A small submission-side semaphore plus retry/backoff fixes
+# both the throttling itself and the quota waste it was causing.
+_SUBMIT_SEMAPHORE = asyncio.Semaphore(2)  # max concurrent task *submissions* to Dashscope
+_SUBMIT_MAX_RETRIES = 5
+_SUBMIT_BASE_BACKOFF = 8  # seconds; doubles each retry
 
 settings = get_settings()
 
@@ -99,9 +113,19 @@ async def call_qwen(
             raise
 
 
+_MIME_BY_EXT = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+
 def _image_uri(path: str | Path) -> str:
-    data = Path(path).read_bytes()
-    return "data:image/png;base64," + base64.b64encode(data).decode()
+    p = Path(path)
+    mime = _MIME_BY_EXT.get(p.suffix.lower(), "image/png")
+    data = p.read_bytes()
+    return f"data:{mime};base64," + base64.b64encode(data).decode()
 
 
 async def call_qwen_vision(
@@ -153,6 +177,79 @@ async def call_qwen_vision(
         return data["choices"][0]["message"]["content"]
 
 
+async def _submit_video_task_with_retry(*, model: str, call_kwargs: dict[str, Any]) -> Any:
+    """Shared submit/backoff logic for both t2v and i2v: caps concurrent
+    submissions via _SUBMIT_SEMAPHORE and retries a 429 with exponential
+    backoff instead of raising immediately (see module docstring above for
+    why this matters for quota). Runs the blocking VideoSynthesis.call() in
+    a worker thread so the event loop stays free (see generate_video_t2v's
+    original FIXED note — applies identically here).
+
+    Extracted out of generate_video_t2v so generate_video_i2v doesn't
+    duplicate this loop verbatim.
+    """
+    task = None
+    async with _SUBMIT_SEMAPHORE:
+        for attempt in range(1, _SUBMIT_MAX_RETRIES + 1):
+            try:
+                task = await asyncio.to_thread(VideoSynthesis.call, model=model, **call_kwargs)
+                break
+            except InvalidTask as exc:
+                # 429 shows up here, not as a status_code check below, because
+                # dashscope's own .call()->.wait() raises InvalidTask before
+                # ever returning a response object when task creation itself
+                # was rejected.
+                if "429" not in str(exc) and "RateQuota" not in str(exc):
+                    raise
+                if attempt == _SUBMIT_MAX_RETRIES:
+                    logger.error(f"✗ Giving up on video submission after {attempt} rate-limited attempts")
+                    raise
+                wait_s = _SUBMIT_BASE_BACKOFF * (2 ** (attempt - 1))
+                logger.warning(
+                    f"⏳ Rate-limited submitting video task (attempt {attempt}/{_SUBMIT_MAX_RETRIES}); "
+                    f"backing off {wait_s}s before retry"
+                )
+                await asyncio.sleep(wait_s)
+
+    if task.status_code != 200:
+        raise RuntimeError(f"Wan submit failed: {task.status_code} {task.code} {task.message}")
+    return task
+
+
+async def _resolve_video_url(task: Any, poll_interval: int, timeout: int) -> str:
+    # VideoSynthesis.call() already blocks internally until the task reaches
+    # a terminal state (see dashscope's base_api.py: .call() invokes .wait()
+    # for you), so task.output should already carry the finished video_url
+    # here rather than needing a fresh round of polling from scratch.
+    video_url = getattr(task.output, "video_url", None)
+    if video_url:
+        return video_url
+
+    # Fallback: if the SDK ever returns before the task is actually terminal
+    # (e.g. a future SDK version splitting submit/wait behavior), poll it
+    # ourselves via raw HTTP.
+    return await _poll_task(task.output.task_id, poll_interval=poll_interval, timeout=timeout)
+
+
+# wan2.6-t2v / wan2.6-i2v-flash both accept an integer duration from 2-15
+# seconds (default 5), billed per second — confirmed against Alibaba Model
+# Studio's current API reference. Clamp to that range everywhere a caller
+# supplies a duration so an LLM-estimated or user-edited value can never
+# reach the API out of bounds.
+MIN_VIDEO_DURATION_SEC = 2
+MAX_VIDEO_DURATION_SEC = 15
+
+
+def clamp_duration(duration: float | int | None, default: int = 5) -> int:
+    if duration is None:
+        return default
+    try:
+        d = round(float(duration))
+    except (TypeError, ValueError):
+        return default
+    return max(MIN_VIDEO_DURATION_SEC, min(MAX_VIDEO_DURATION_SEC, d))
+
+
 async def generate_video_t2v(
     prompt: str,
     size: str = "720*1280",
@@ -169,31 +266,58 @@ async def generate_video_t2v(
         logger.warning("No QWEN_API_KEY, returning stub video URL.")
         return f"https://example.com/stub_{uuid.uuid4().hex[:8]}.mp4"
 
-    logger.info(f"🎬 Submitting video generation task: model={model}, duration={duration}s")
+    duration = clamp_duration(duration)
+    logger.info(f"🎬 Submitting T2V task: model={model}, duration={duration}s")
 
-    # We use synchronous Dashscope SDK for submission, wrapped or just directly if it's quick
-    # (Dashscope SDK does network request so it blocks, but we can live with it for this submission step)
-    task = VideoSynthesis.call(
+    task = await _submit_video_task_with_retry(
         model=model,
-        prompt=prompt,
-        size=size,
-        duration=duration,
+        call_kwargs={"prompt": prompt, "size": size, "duration": duration},
     )
-    if task.status_code != 200:
-        raise RuntimeError(f"Wan submit failed: {task.status_code} {task.code} {task.message}")
+    return await _resolve_video_url(task, poll_interval, timeout)
 
-    # VideoSynthesis.call() already blocks internally until the task reaches
-    # a terminal state (see dashscope's base_api.py: .call() invokes .wait()
-    # for you), so task.output should already carry the finished video_url
-    # here rather than needing a fresh round of polling from scratch.
-    video_url = getattr(task.output, "video_url", None)
-    if video_url:
-        return video_url
 
-    # Fallback: if the SDK ever returns before the task is actually terminal
-    # (e.g. a future SDK version splitting submit/wait behavior), poll it
-    # ourselves via raw HTTP.
-    return await _poll_task(task.output.task_id, poll_interval=poll_interval, timeout=timeout)
+async def generate_video_i2v(
+    image_path: str | Path,
+    prompt: str = "",
+    duration: int = 5,
+    model: str = "wan2.6-i2v-flash",
+    resolution: str = "720P",
+    audio: bool = False,
+    poll_interval: int = 8,
+    timeout: int = 600,
+) -> str:
+    """
+    Submit a Wan image-to-video task, conditioned on a local reference still
+    (base64-encoded — no public hosting needed). This is the actual
+    character-consistency mechanism: unlike t2v, i2v anchors the generated
+    video to the pixels of a specific reference image instead of re-deriving
+    the character from text alone each time, which is what let identity
+    drift shot-to-shot in the first place.
+
+    Note: i2v derives output aspect ratio from the input image itself, not
+    from a `size` param (that's why there's no `size` arg here) — callers
+    must ensure the reference still is already 9:16 portrait to match the
+    episode format (720x1280).
+    """
+    if not settings.effective_dashscope_key:
+        logger.warning("No QWEN_API_KEY, returning stub video URL.")
+        return f"https://example.com/stub_{uuid.uuid4().hex[:8]}.mp4"
+
+    duration = clamp_duration(duration)
+    logger.info(f"🎬 Submitting I2V task: model={model}, duration={duration}s, ref={image_path}")
+
+    img_uri = _image_uri(image_path)
+    call_kwargs: dict[str, Any] = {
+        "img_url": img_uri,
+        "duration": duration,
+        "resolution": resolution,
+        "audio": audio,
+    }
+    if prompt:
+        call_kwargs["prompt"] = prompt
+
+    task = await _submit_video_task_with_retry(model=model, call_kwargs=call_kwargs)
+    return await _resolve_video_url(task, poll_interval, timeout)
 
 
 async def _poll_task(task_id: str, poll_interval: int = 8, timeout: int = 600) -> str:

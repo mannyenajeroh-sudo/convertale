@@ -45,6 +45,11 @@ class Project(Base):
     title: Mapped[str | None] = mapped_column(String)
     concept_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String, default="created", nullable=False, index=True)
+    # Path (under MEDIA_DIR, see assembly.py) to the brand logo the user
+    # uploaded via POST /api/projects/{id}/logo. Nullable — logo overlay is
+    # optional. AssemblyAgent reads this (passed through by pipeline.py) to
+    # composite the logo onto the final rendered episode.
+    brand_logo_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
